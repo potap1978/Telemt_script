@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+# Отключаем set -e в начале, будем обрабатывать ошибки вручную
+set +e
 
 # ============================================
 # Цвета и оформление
@@ -333,11 +334,7 @@ add_user() {
         sed -i "/^temp_user = /d" $TELEMT_CONFIG
     fi
     
-    if ! systemctl restart telemt; then
-        error "Ошибка при перезапуске telemt"
-        pause
-        return
-    fi
+    systemctl restart telemt
     sleep 2
     
     server_ip=$(get_server_ip)
@@ -476,12 +473,7 @@ remove_user() {
     fi
     
     sed -i "/^$username_to_remove = /d" $TELEMT_CONFIG
-    
-    if ! systemctl restart telemt; then
-        error "Ошибка при перезапуске telemt"
-        pause
-        return
-    fi
+    systemctl restart telemt
     success "Пользователь $username_to_remove удален"
     
     pause
@@ -515,21 +507,13 @@ change_sni() {
     fi
     
     step "Обновление конфигурации..."
-    if ! sed -i "s/tls_domain = \".*\"/tls_domain = \"$new_sni\"/" $TELEMT_CONFIG; then
-        error "Ошибка при обновлении конфигурации"
-        pause
-        return
-    fi
+    sed -i "s/tls_domain = \".*\"/tls_domain = \"$new_sni\"/" $TELEMT_CONFIG
     
     # Проверяем, есть ли пользователи в конфиге
     ensure_at_least_one_user
     
     step "Перезапуск сервиса..."
-    if ! systemctl restart telemt; then
-        error "Ошибка при перезапуске telemt"
-        pause
-        return
-    fi
+    systemctl restart telemt
     
     sleep 2
     
@@ -567,21 +551,13 @@ change_port() {
     fi
     
     step "Обновление порта в конфигурации..."
-    if ! sed -i "s/port = [0-9]*/port = $new_port/" $TELEMT_CONFIG; then
-        error "Ошибка при обновлении конфигурации"
-        pause
-        return
-    fi
+    sed -i "s/port = [0-9]*/port = $new_port/" $TELEMT_CONFIG
     
     # Проверяем, есть ли пользователи в конфиге
     ensure_at_least_one_user
     
     step "Перезапуск сервиса..."
-    if ! systemctl restart telemt; then
-        error "Ошибка при перезапуске telemt"
-        pause
-        return
-    fi
+    systemctl restart telemt
     
     if systemctl is-active --quiet telemt; then
         success "Порт изменен на $new_port"
