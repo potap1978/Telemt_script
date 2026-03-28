@@ -83,6 +83,18 @@ get_users_count() {
     get_users_list | wc -l
 }
 
+get_ip_limits() {
+    declare -A limits
+    while IFS='=' read -r user limit; do
+        user=$(echo "$user" | xargs)
+        limit=$(echo "$limit" | xargs)
+        if [[ -n "$user" && "$limit" =~ ^[0-9]+$ ]]; then
+            limits["$user"]="$limit"
+        fi
+    done < <(sed -n '/^\[access.user_max_unique_ips\]/,/^\[/p' $TELEMT_CONFIG | grep -E '^[a-zA-Z0-9_-]+ = [0-9]+' 2>/dev/null || true)
+    echo "${limits[@]@A}" 2>/dev/null || true
+}
+
 # Функция для проверки и добавления тестового пользователя при необходимости
 ensure_at_least_one_user() {
     local users_count=$(get_users_count 2>/dev/null || echo 0)
@@ -329,6 +341,13 @@ add_user() {
     
     [[ -z "$username" ]] && username="user_$(date +%s)"
     
+    # Спрашиваем про ограничение IP
+    echo ""
+    echo -e "${CYAN}Ограничение по IP:${NC}"
+    echo "  Если включить, ссылкой сможет пользоваться только один человек одновременно"
+    echo "  (с одного IP-адреса)"
+    read -p "Установить лимит 1 IP на пользователя? (y/N): " limit_ip
+    
     secret_random=$(openssl rand -hex 16)
     sni_hex=$(echo -n "$current_sni" | xxd -p -c 1000)
     full_secret="ee${secret_random}${sni_hex}"
@@ -336,10 +355,23 @@ add_user() {
     # Добавляем пользователя
     echo "$username = \"$secret_random\"" >> $TELEMT_CONFIG
     
+    # Добавляем ограничение IP, если пользователь согласился
+    if [[ "$limit_ip" == "y" || "$limit_ip" == "Y" ]]; then
+        # Проверяем, есть ли уже секция [access.user_max_unique_ips]
+        if ! grep -q "^\[access.user_max_unique_ips\]" $TELEMT_CONFIG; then
+            echo "" >> $TELEMT_CONFIG
+            echo "[access.user_max_unique_ips]" >> $TELEMT_CONFIG
+        fi
+        echo "$username = 1" >> $TELEMT_CONFIG
+        info "Для пользователя $username установлено ограничение: 1 IP"
+    fi
+    
     # Удаляем тестового пользователя если он есть и это не единственный пользователь
     users_count=$(get_users_count)
     if [[ $users_count -gt 1 ]] && grep -q "^temp_user = " $TELEMT_CONFIG; then
         sed -i "/^temp_user = /d" $TELEMT_CONFIG
+        # Также удаляем ограничение для temp_user если есть
+        sed -i "/^temp_user = [0-9]/d" $TELEMT_CONFIG
     fi
     
     systemctl restart telemt
@@ -354,6 +386,11 @@ add_user() {
     echo -e "${GREEN}${BOLD}ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН!${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}Имя:${NC} $username"
+    if [[ "$limit_ip" == "y" || "$limit_ip" == "Y" ]]; then
+        echo -e "${YELLOW}Ограничение:${NC} ${GREEN}1 IP одновременно${NC}"
+    else
+        echo -e "${YELLOW}Ограничение:${NC} без ограничений"
+    fi
     echo -e "${YELLOW}📱 TG ссылка (нажмите для установки):${NC}"
     echo -e "${GREEN}$tg_link${NC}"
     echo ""
@@ -393,8 +430,18 @@ list_users() {
         return
     fi
     
+    # Получаем список ограничений
+    declare -A ip_limits
+    while IFS='=' read -r user limit; do
+        user=$(echo "$user" | xargs)
+        limit=$(echo "$limit" | xargs)
+        if [[ -n "$user" && "$limit" =~ ^[0-9]+$ ]]; then
+            ip_limits["$user"]="$limit"
+        fi
+    done < <(sed -n '/^\[access.user_max_unique_ips\]/,/^\[/p' $TELEMT_CONFIG | grep -E '^[a-zA-Z0-9_-]+ = [0-9]+' 2>/dev/null || true)
+    
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    printf "${CYAN}%-4s %-20s %-40s${NC}\n" "№" "ИМЯ" "СЕКРЕТ (32 hex)"
+    printf "${CYAN}%-4s %-20s %-40s %-10s${NC}\n" "№" "ИМЯ" "СЕКРЕТ (32 hex)" "ЛИМИТ IP"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     line_num=1
@@ -402,6 +449,14 @@ list_users() {
         username=$(echo "$username" | xargs)
         secret=$(echo "$secret_part" | xargs | tr -d '"')
         if [[ -n "$username" && "$username" != "#"* ]]; then
+            # Получаем лимит для пользователя
+            limit="${ip_limits[$username]:-без лимита}"
+            if [[ "$limit" == "1" ]]; then
+                limit_display="${GREEN}1 IP${NC}"
+            else
+                limit_display="${YELLOW}$limit${NC}"
+            fi
+            
             # Формируем полный секрет для ссылки
             sni_hex=$(echo -n "$current_sni" | xxd -p -c 1000)
             full_secret="ee${secret}${sni_hex}"
@@ -409,7 +464,7 @@ list_users() {
             https_link="https://t.me/proxy?server=$server_ip&port=$current_port&secret=$full_secret"
             
             # Выводим информацию
-            printf "%-4s %-20s %-40s\n" "$line_num" "$username" "$secret"
+            printf "%-4s %-20s %-40s ${limit_display}\n" "$line_num" "$username" "$secret"
             echo -e "    ${GREEN}📱 TG ссылка:${NC} $tg_link"
             echo -e "    ${BLUE}🌐 HTTP ссылка:${NC} $https_link"
             echo ""
@@ -492,6 +547,7 @@ remove_user() {
     fi
     
     sed -i "/^$username_to_remove = /d" $TELEMT_CONFIG
+    sed -i "/^$username_to_remove = [0-9]/d" $TELEMT_CONFIG
     systemctl restart telemt
     success "Пользователь $username_to_remove удален"
     
@@ -499,7 +555,7 @@ remove_user() {
 }
 
 # ============================================
-# Настройка SNI и порта
+# Настройка SNI, порта и лимитов
 # ============================================
 change_sni() {
     clear
@@ -586,6 +642,126 @@ change_port() {
     else
         error "Сервис не запустился. Проверьте логи: journalctl -u telemt -n 20"
     fi
+    
+    pause
+}
+
+change_user_limit() {
+    clear
+    echo -e "${MAGENTA}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${MAGENTA}${BOLD}           ИЗМЕНЕНИЕ ЛИМИТА ПОЛЬЗОВАТЕЛЯ${NC}"
+    echo -e "${MAGENTA}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    if ! check_telemt_installed; then
+        pause
+        return
+    fi
+    
+    users=$(get_users_list)
+    
+    if [[ -z "$users" ]]; then
+        warn "Нет добавленных пользователей"
+        pause
+        return
+    fi
+    
+    # Получаем текущие лимиты
+    declare -A current_limits
+    while IFS='=' read -r user limit; do
+        user=$(echo "$user" | xargs)
+        limit=$(echo "$limit" | xargs)
+        if [[ -n "$user" && "$limit" =~ ^[0-9]+$ ]]; then
+            current_limits["$user"]="$limit"
+        fi
+    done < <(sed -n '/^\[access.user_max_unique_ips\]/,/^\[/p' $TELEMT_CONFIG | grep -E '^[a-zA-Z0-9_-]+ = [0-9]+' 2>/dev/null || true)
+    
+    # Показываем список пользователей с текущими лимитами
+    echo -e "${CYAN}Существующие пользователи:${NC}"
+    echo "─────────────────────────────────────────────────────────────────────────────"
+    printf "${CYAN}%-4s %-20s %-15s${NC}\n" "№" "ИМЯ" "ТЕКУЩИЙ ЛИМИТ"
+    echo "─────────────────────────────────────────────────────────────────────────────"
+    
+    line_num=1
+    declare -a usernames
+    while IFS='=' read -r username secret_part; do
+        username=$(echo "$username" | xargs)
+        if [[ -n "$username" && "$username" != "#"* ]]; then
+            limit="${current_limits[$username]:-без лимита}"
+            printf "%-4s %-20s %-15s\n" "$line_num" "$username" "$limit"
+            usernames[$line_num]=$username
+            ((line_num++))
+        fi
+    done <<< "$users"
+    echo "─────────────────────────────────────────────────────────────────────────────"
+    echo ""
+    
+    users_count=$((line_num - 1))
+    
+    if [[ $users_count -eq 0 ]]; then
+        warn "Нет пользователей"
+        pause
+        return
+    fi
+    
+    read -p "Введите номер пользователя (1-$users_count): " user_num
+    
+    if ! [[ "$user_num" =~ ^[0-9]+$ ]] || [[ $user_num -lt 1 ]] || [[ $user_num -ge $line_num ]]; then
+        error "Неверный номер"
+        pause
+        return
+    fi
+    
+    username="${usernames[$user_num]}"
+    current_limit="${current_limits[$username]:-0}"
+    
+    echo ""
+    echo -e "${CYAN}Пользователь:${NC} ${YELLOW}$username${NC}"
+    echo -e "${CYAN}Текущий лимит:${NC} ${YELLOW}$([ "$current_limit" == "0" ] && echo "без лимита" || echo "$current_limit IP")${NC}"
+    echo ""
+    echo "Выберите новый лимит:"
+    echo "  1) Без лимита (0)"
+    echo "  2) 1 IP одновременно"
+    echo "  3) Свой вариант (введите число)"
+    read -p "Выбор [1-3]: " limit_choice
+    
+    case $limit_choice in
+        1) new_limit="0" ;;
+        2) new_limit="1" ;;
+        3) 
+            read -p "Введите количество IP (число): " new_limit
+            if ! [[ "$new_limit" =~ ^[0-9]+$ ]]; then
+                error "Неверное значение"
+                pause
+                return
+            fi
+            ;;
+        *)
+            error "Неверный выбор"
+            pause
+            return
+            ;;
+    esac
+    
+    # Обновляем или создаём секцию с лимитами
+    if ! grep -q "^\[access.user_max_unique_ips\]" $TELEMT_CONFIG; then
+        echo "" >> $TELEMT_CONFIG
+        echo "[access.user_max_unique_ips]" >> $TELEMT_CONFIG
+    fi
+    
+    # Удаляем старую запись если есть
+    sed -i "/^$username = [0-9]/d" $TELEMT_CONFIG
+    
+    # Добавляем новую запись, если лимит не 0
+    if [[ "$new_limit" != "0" ]]; then
+        # Вставляем после секции [access.user_max_unique_ips]
+        sed -i "/^\[access.user_max_unique_ips\]/a $username = $new_limit" $TELEMT_CONFIG
+        success "Для пользователя $username установлен лимит: $new_limit IP"
+    else
+        success "Для пользователя $username убран лимит"
+    fi
+    
+    systemctl restart telemt
     
     pause
 }
@@ -1248,13 +1424,14 @@ show_menu() {
     echo -e "${BLUE}  НАСТРОЙКА${NC}"
     echo -e "  ${BLUE}6)${NC} Сменить SNI (TLS маскировку)"
     echo -e "  ${BLUE}7)${NC} Сменить порт"
+    echo -e "  ${BLUE}8)${NC} Изменить лимит IP для пользователя"
     echo ""
     echo -e "${CYAN}  ИНФОРМАЦИЯ${NC}"
-    echo -e "  ${CYAN}8)${NC} Статус и информация"
+    echo -e "  ${CYAN}9)${NC} Статус и информация"
     echo ""
     echo -e "${MAGENTA}  TELEGRAM БОТ${NC}"
-    echo -e "  ${MAGENTA}9)${NC} Установить Telegram бота"
-    echo -e "  ${RED}10)${NC} Удалить Telegram бота"
+    echo -e "  ${MAGENTA}10)${NC} Установить Telegram бота"
+    echo -e "  ${RED}11)${NC} Удалить Telegram бота"
     echo ""
     echo -e "${RED}  0)${NC} Выход"
     echo ""
@@ -1278,16 +1455,17 @@ main() {
             5) remove_user ;;
             6) change_sni ;;
             7) change_port ;;
-            8) show_status ;;
-            9) install_bot ;;
-            10) uninstall_bot ;;
+            8) change_user_limit ;;
+            9) show_status ;;
+            10) install_bot ;;
+            11) uninstall_bot ;;
             0) 
                 clear
                 info "До свидания!"
                 exit 0
                 ;;
             *) 
-                error "Неверный выбор. Пожалуйста, выберите от 0 до 10"
+                error "Неверный выбор. Пожалуйста, выберите от 0 до 11"
                 sleep 2
                 ;;
         esac
