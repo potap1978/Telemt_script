@@ -83,18 +83,6 @@ get_users_count() {
     get_users_list | wc -l
 }
 
-get_ip_limits() {
-    declare -A limits
-    while IFS='=' read -r user limit; do
-        user=$(echo "$user" | xargs)
-        limit=$(echo "$limit" | xargs)
-        if [[ -n "$user" && "$limit" =~ ^[0-9]+$ ]]; then
-            limits["$user"]="$limit"
-        fi
-    done < <(sed -n '/^\[access.user_max_unique_ips\]/,/^\[/p' $TELEMT_CONFIG | grep -E '^[a-zA-Z0-9_-]+ = [0-9]+' 2>/dev/null || true)
-    echo "${limits[@]@A}" 2>/dev/null || true
-}
-
 # Функция для проверки и добавления тестового пользователя при необходимости
 ensure_at_least_one_user() {
     local users_count=$(get_users_count 2>/dev/null || echo 0)
@@ -341,6 +329,13 @@ add_user() {
     
     [[ -z "$username" ]] && username="user_$(date +%s)"
     
+    # Проверка: существует ли уже такой пользователь
+    if grep -q "^$username = " $TELEMT_CONFIG; then
+        error "Пользователь с именем '$username' уже существует!"
+        pause
+        return
+    fi
+    
     # Спрашиваем про ограничение IP
     echo ""
     echo -e "${CYAN}Ограничение по IP:${NC}"
@@ -357,7 +352,6 @@ add_user() {
     
     # Добавляем ограничение IP, если пользователь согласился
     if [[ "$limit_ip" == "y" || "$limit_ip" == "Y" ]]; then
-        # Проверяем, есть ли уже секция [access.user_max_unique_ips]
         if ! grep -q "^\[access.user_max_unique_ips\]" $TELEMT_CONFIG; then
             echo "" >> $TELEMT_CONFIG
             echo "[access.user_max_unique_ips]" >> $TELEMT_CONFIG
@@ -370,7 +364,6 @@ add_user() {
     users_count=$(get_users_count)
     if [[ $users_count -gt 1 ]] && grep -q "^temp_user = " $TELEMT_CONFIG; then
         sed -i "/^temp_user = /d" $TELEMT_CONFIG
-        # Также удаляем ограничение для temp_user если есть
         sed -i "/^temp_user = [0-9]/d" $TELEMT_CONFIG
     fi
     
@@ -754,7 +747,6 @@ change_user_limit() {
     
     # Добавляем новую запись, если лимит не 0
     if [[ "$new_limit" != "0" ]]; then
-        # Вставляем после секции [access.user_max_unique_ips]
         sed -i "/^\[access.user_max_unique_ips\]/a $username = $new_limit" $TELEMT_CONFIG
         success "Для пользователя $username установлен лимит: $new_limit IP"
     else
@@ -920,6 +912,7 @@ def add_user_to_config(username, secret):
         if not re.match(r'^[a-zA-Z0-9_-]+$', username):
             return False
         
+        # Проверка на существующего пользователя
         existing_users = get_users()
         for u in existing_users:
             if u['name'] == username:
