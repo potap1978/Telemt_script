@@ -319,6 +319,14 @@ add_user() {
     echo ""
     
     read -p "Введите имя пользователя (тег): " username
+    
+    # Проверка имени пользователя (только латиница, цифры, - и _)
+    if ! [[ "$username" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error "Имя пользователя может содержать только латинские буквы, цифры, - и _"
+        pause
+        return
+    fi
+    
     [[ -z "$username" ]] && username="user_$(date +%s)"
     
     secret_random=$(openssl rand -hex 16)
@@ -721,6 +729,10 @@ def get_users():
 
 def add_user_to_config(username, secret):
     try:
+        # Проверка имени пользователя (только латиница, цифры, - и _)
+        if not re.match(r'^[a-zA-Z0-9_-]+$', username):
+            return False
+        
         existing_users = get_users()
         for u in existing_users:
             if u['name'] == username:
@@ -885,7 +897,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "add_user":
         user_inputs[user_id] = {'action': 'add_user'}
         await query.edit_message_text(
-            "Введите имя пользователя:",
+            "Введите имя пользователя (только латиница, цифры, - и _):",
             reply_markup=get_cancel_keyboard()
         )
         
@@ -975,6 +987,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if action == 'add_user':
         username = text
+        
+        # Проверка имени пользователя (только латиница, цифры, - и _)
+        if not re.match(r'^[a-zA-Z0-9_-]+$', username):
+            await update.message.reply_text("❌ Имя пользователя может содержать только латинские буквы, цифры, - и _")
+            await update.message.reply_text(
+                "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
+                reply_markup=get_main_keyboard(),
+                parse_mode='Markdown'
+            )
+            del user_inputs[user_id]
+            return
+        
         existing_users = get_users()
         for u in existing_users:
             if u['name'] == username:
