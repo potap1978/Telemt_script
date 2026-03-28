@@ -114,7 +114,8 @@ ensure_at_least_one_user() {
                 echo "" >> $TELEMT_CONFIG
                 echo "[access.users]" >> $TELEMT_CONFIG
             fi
-            echo "temp_user = \"$temp_secret\"" >> $TELEMT_CONFIG
+            # Добавляем тестового пользователя
+            sed -i "/^\[access.users\]/a temp_user = \"$temp_secret\"" $TELEMT_CONFIG
             fix_config_permissions
             info "Добавлен тестовый пользователь: temp_user"
             return 0
@@ -383,8 +384,8 @@ add_user() {
         echo "[access.users]" >> $TELEMT_CONFIG
     fi
     
-    # Добавляем пользователя в секцию access.users
-    echo "$username = \"$secret_random\"" >> $TELEMT_CONFIG
+    # Добавляем пользователя в секцию access.users (сразу после строки [access.users])
+    sed -i "/^\[access.users\]/a $username = \"$secret_random\"" $TELEMT_CONFIG
     
     # Сразу восстанавливаем права, чтобы telemt мог читать
     fix_config_permissions
