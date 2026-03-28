@@ -89,31 +89,6 @@ fix_config_permissions() {
     chmod 644 $TELEMT_CONFIG 2>/dev/null
 }
 
-# Функция для очистки секции лимитов от некорректных записей
-clean_limits_section() {
-    if grep -q "^\[access.user_max_unique_ips\]" $TELEMT_CONFIG; then
-        local temp_file=$(mktemp)
-        local in_limits=0
-        
-        while IFS= read -r line; do
-            if [[ "$line" == "[access.user_max_unique_ips]" ]]; then
-                in_limits=1
-                echo "$line" >> $temp_file
-            elif [[ $in_limits -eq 1 ]] && [[ "$line" =~ ^\[ ]]; then
-                in_limits=0
-                echo "$line" >> $temp_file
-            elif [[ $in_limits -eq 1 ]] && [[ "$line" =~ ^[a-zA-Z0-9_-]+\ =\ [0-9]+$ ]]; then
-                echo "$line" >> $temp_file
-            elif [[ $in_limits -eq 0 ]]; then
-                echo "$line" >> $temp_file
-            fi
-        done < $TELEMT_CONFIG
-        
-        mv $temp_file $TELEMT_CONFIG
-        fix_config_permissions
-    fi
-}
-
 # Функция для проверки и добавления тестового пользователя при необходимости
 ensure_at_least_one_user() {
     local users_count=$(get_users_count 2>/dev/null || echo 0)
@@ -121,6 +96,11 @@ ensure_at_least_one_user() {
         step "Нет пользователей. Добавляем тестового..."
         local temp_secret=$(openssl rand -hex 16 2>/dev/null)
         if [[ -n "$temp_secret" ]]; then
+            # Проверяем, есть ли секция [access.users]
+            if ! grep -q "^\[access.users\]" $TELEMT_CONFIG; then
+                echo "" >> $TELEMT_CONFIG
+                echo "[access.users]" >> $TELEMT_CONFIG
+            fi
             echo "temp_user = \"$temp_secret\"" >> $TELEMT_CONFIG
             fix_config_permissions
             info "Добавлен тестовый пользователь: temp_user"
@@ -253,7 +233,6 @@ listen = "127.0.0.1:9091"
 tls_domain = "www.google.com"
 
 [access.users]
-# Тестовый пользователь (32 hex)
 temp_user = "$temp_secret"
 EOF
     chown $TELEMT_USER:$TELEMT_GROUP $TELEMT_CONFIG
@@ -379,6 +358,12 @@ add_user() {
     secret_random=$(openssl rand -hex 16)
     sni_hex=$(echo -n "$current_sni" | xxd -p -c 1000)
     full_secret="ee${secret_random}${sni_hex}"
+    
+    # Проверяем, есть ли секция [access.users]
+    if ! grep -q "^\[access.users\]" $TELEMT_CONFIG; then
+        echo "" >> $TELEMT_CONFIG
+        echo "[access.users]" >> $TELEMT_CONFIG
+    fi
     
     # Добавляем пользователя
     echo "$username = \"$secret_random\"" >> $TELEMT_CONFIG
@@ -963,7 +948,6 @@ def get_users():
     return users
 
 def get_user_limit(username):
-    """Получить лимит IP для пользователя"""
     try:
         in_limits = False
         with open(TELEMT_CONFIG, 'r') as f:
@@ -986,9 +970,7 @@ def get_user_limit(username):
     return 0
 
 def set_user_limit(username, limit):
-    """Установить лимит IP для пользователя"""
     try:
-        # Удаляем старую запись
         with open(TELEMT_CONFIG, 'r') as f:
             lines = f.readlines()
         
@@ -1006,7 +988,6 @@ def set_user_limit(username, limit):
                     continue
                 f.write(line)
         
-        # Добавляем новую запись, если лимит > 0
         if limit > 0:
             with open(TELEMT_CONFIG, 'r') as f:
                 lines = f.readlines()
@@ -1017,7 +998,6 @@ def set_user_limit(username, limit):
                     if '[access.user_max_unique_ips]' in line:
                         f.write(f'{username} = {limit}\n')
         
-        # Восстанавливаем права
         subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
@@ -1028,11 +1008,9 @@ def set_user_limit(username, limit):
 
 def add_user_to_config(username, secret):
     try:
-        # Проверка имени пользователя (только латиница, цифры, - и _)
         if not re.match(r'^[a-zA-Z0-9_-]+$', username):
             return False
         
-        # Проверка на существующего пользователя
         existing_users = get_users()
         for u in existing_users:
             if u['name'] == username:
@@ -1041,13 +1019,23 @@ def add_user_to_config(username, secret):
         with open(TELEMT_CONFIG, 'r') as f:
             lines = f.readlines()
         
+        # Проверяем, есть ли секция [access.users]
+        has_users_section = False
+        for line in lines:
+            if '[access.users]' in line:
+                has_users_section = True
+                break
+        
         with open(TELEMT_CONFIG, 'w') as f:
             for line in lines:
                 f.write(line)
                 if '[access.users]' in line:
                     f.write(f'{username} = "{secret}"\n')
+            
+            if not has_users_section:
+                f.write('\n[access.users]\n')
+                f.write(f'{username} = "{secret}"\n')
         
-        # Восстанавливаем права
         subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
@@ -1075,7 +1063,6 @@ def remove_user_from_config(username):
                     continue
                 f.write(line)
         
-        # Также удаляем лимит, если есть
         with open(TELEMT_CONFIG, 'r') as f:
             lines = f.readlines()
         
@@ -1093,7 +1080,6 @@ def remove_user_from_config(username):
                     continue
                 f.write(line)
         
-        # Восстанавливаем права
         subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
@@ -1352,7 +1338,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == 'add_user':
         username = text
         
-        # Проверка имени пользователя (только латиница, цифры, - и _)
         if not re.match(r'^[a-zA-Z0-9_-]+$', username):
             await update.message.reply_text("❌ Имя пользователя может содержать только латинские буквы, цифры, - и _")
             await update.message.reply_text(
@@ -1463,35 +1448,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_inputs[user_id]
 
 async def show_main_menu(update):
-    keyboard = [
-        [InlineKeyboardButton("📊 Статус", callback_data="status")],
-        [InlineKeyboardButton("👥 Список пользователей", callback_data="list_users")],
-        [InlineKeyboardButton("➕ Добавить пользователя", callback_data="add_user")],
-        [InlineKeyboardButton("❌ Удалить пользователя", callback_data="remove_user")],
-        [InlineKeyboardButton("🔒 Сменить SNI", callback_data="change_sni")],
-        [InlineKeyboardButton("🔌 Сменить порт", callback_data="change_port")],
-        [InlineKeyboardButton("🔢 Лимит IP для пользователя", callback_data="change_limit")],
-        [InlineKeyboardButton("🔄 Перезапустить telemt", callback_data="restart")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     if isinstance(update, Update):
         if update.callback_query:
             await update.callback_query.message.edit_message_text(
                 "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-                reply_markup=reply_markup,
+                reply_markup=get_main_keyboard(),
                 parse_mode='Markdown'
             )
         elif update.message:
             await update.message.reply_text(
                 "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-                reply_markup=reply_markup,
+                reply_markup=get_main_keyboard(),
                 parse_mode='Markdown'
             )
     else:
         await update.edit_message_text(
             "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=reply_markup,
+            reply_markup=get_main_keyboard(),
             parse_mode='Markdown'
         )
 
@@ -1683,7 +1656,6 @@ show_menu() {
 # ============================================
 main() {
     check_root
-    clean_limits_section
     
     while true; do
         show_menu
