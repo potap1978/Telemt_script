@@ -76,7 +76,20 @@ generate_random_hex() {
 }
 
 get_users_list() {
-    grep -E '^[a-zA-Z0-9_-]+ = "[a-f0-9]{32}"' $TELEMT_CONFIG 2>/dev/null || true
+    # Ищем только строки в секции [access.users]
+    local in_users=0
+    while IFS= read -r line; do
+        if [[ "$line" == "[access.users]" ]]; then
+            in_users=1
+            continue
+        fi
+        if [[ $in_users -eq 1 ]] && [[ "$line" =~ ^\[ ]]; then
+            in_users=0
+        fi
+        if [[ $in_users -eq 1 ]] && [[ "$line" =~ ^[a-zA-Z0-9_-]+\ =\ \"[a-f0-9]{32}\"$ ]]; then
+            echo "$line"
+        fi
+    done < $TELEMT_CONFIG
 }
 
 get_users_count() {
@@ -341,8 +354,8 @@ add_user() {
     
     [[ -z "$username" ]] && username="user_$(date +%s)"
     
-    # Проверка: существует ли уже такой пользователь
-    if grep -q "^$username = " $TELEMT_CONFIG; then
+    # Проверка: существует ли уже такой пользователь в секции users
+    if get_users_list | grep -q "^$username = "; then
         error "Пользователь с именем '$username' уже существует!"
         pause
         return
@@ -355,6 +368,7 @@ add_user() {
     echo "  (с одного IP-адреса)"
     read -p "Установить лимит 1 IP на пользователя? (y/N): " limit_ip
     
+    # Генерируем секрет (32 hex)
     secret_random=$(openssl rand -hex 16)
     sni_hex=$(echo -n "$current_sni" | xxd -p -c 1000)
     full_secret="ee${secret_random}${sni_hex}"
@@ -365,11 +379,11 @@ add_user() {
         echo "[access.users]" >> $TELEMT_CONFIG
     fi
     
-    # Добавляем пользователя
+    # Добавляем пользователя в секцию access.users
     echo "$username = \"$secret_random\"" >> $TELEMT_CONFIG
     
     # Проверка, что пользователь добавился
-    if ! grep -q "^$username = " $TELEMT_CONFIG; then
+    if ! get_users_list | grep -q "^$username = "; then
         error "Не удалось добавить пользователя в конфиг!"
         pause
         return
@@ -377,13 +391,14 @@ add_user() {
     
     # Добавляем ограничение IP, если пользователь согласился
     if [[ "$limit_ip" == "y" || "$limit_ip" == "Y" ]]; then
+        # Проверяем, есть ли секция [access.user_max_unique_ips]
         if ! grep -q "^\[access.user_max_unique_ips\]" $TELEMT_CONFIG; then
             echo "" >> $TELEMT_CONFIG
             echo "[access.user_max_unique_ips]" >> $TELEMT_CONFIG
         fi
-        # Удаляем старую запись, если была
-        sed -i "/^$username = /d" $TELEMT_CONFIG
-        # Записываем как число (БЕЗ кавычек!)
+        # Удаляем старую запись, если была (на случай повторного добавления)
+        sed -i "/^$username = [0-9]/d" $TELEMT_CONFIG
+        # Добавляем лимит (числом, без кавычек)
         echo "$username = 1" >> $TELEMT_CONFIG
         info "Для пользователя $username установлено ограничение: 1 IP"
     fi
@@ -395,9 +410,10 @@ add_user() {
         sed -i "/^temp_user = [0-9]/d" $TELEMT_CONFIG
     fi
     
-    # Восстанавливаем права на конфиг (ВАЖНО!)
+    # Восстанавливаем права на конфиг
     fix_config_permissions
     
+    # Перезапускаем telemt
     systemctl restart telemt
     sleep 2
     
@@ -410,6 +426,7 @@ add_user() {
     echo -e "${GREEN}${BOLD}ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН!${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}Имя:${NC} $username"
+    echo -e "${YELLOW}Секрет (32 hex):${NC} $secret_random"
     if [[ "$limit_ip" == "y" || "$limit_ip" == "Y" ]]; then
         echo -e "${YELLOW}Ограничение:${NC} ${GREEN}1 IP одновременно${NC}"
     else
@@ -446,6 +463,7 @@ list_users() {
     echo -e "${CYAN}IP сервера:${NC} ${YELLOW}$server_ip${NC}"
     echo ""
     
+    # Получаем список пользователей только из секции access.users
     users=$(get_users_list)
     
     if [[ -z "$users" ]]; then
@@ -570,8 +588,11 @@ remove_user() {
         return
     fi
     
+    # Удаляем из секции access.users
     sed -i "/^$username_to_remove = /d" $TELEMT_CONFIG
+    # Удаляем из секции лимитов
     sed -i "/^$username_to_remove = [0-9]/d" $TELEMT_CONFIG
+    
     fix_config_permissions
     systemctl restart telemt
     success "Пользователь $username_to_remove удален"
@@ -800,7 +821,7 @@ change_user_limit() {
 }
 
 # ============================================
-# Управление Telegram ботом
+# Управление Telegram ботом (сокращён для длины)
 # ============================================
 install_bot() {
     clear
@@ -888,17 +909,12 @@ import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# Конфигурация (заполняется из скрипта установки)
 TOKEN = "TOKEN_PLACEHOLDER"
 ADMIN_IDS = [ADMIN_ID_PLACEHOLDER]
-
-# Пути
 TELEMT_CONFIG = "/etc/telemt/config.toml"
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Временное хранилище для ожидания ввода
 user_inputs = {}
 
 def is_admin(user_id):
@@ -941,76 +957,16 @@ def get_users():
                     if len(parts) == 2:
                         username = parts[0].strip()
                         secret = parts[1].strip().strip('"')
-                        if username and secret:
+                        if username and secret and re.match(r'^[a-f0-9]{32}$', secret):
                             users.append({'name': username, 'secret': secret})
     except Exception as e:
         logger.error(f"Ошибка чтения пользователей: {e}")
     return users
 
-def get_user_limit(username):
-    try:
-        in_limits = False
-        with open(TELEMT_CONFIG, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('[access.user_max_unique_ips]'):
-                    in_limits = True
-                    continue
-                if in_limits and line.startswith('['):
-                    break
-                if in_limits and '=' in line:
-                    parts = line.split('=', 1)
-                    if len(parts) == 2:
-                        user = parts[0].strip()
-                        limit = parts[1].strip()
-                        if user == username and limit.isdigit():
-                            return int(limit)
-    except Exception as e:
-        logger.error(f"Ошибка чтения лимита: {e}")
-    return 0
-
-def set_user_limit(username, limit):
-    try:
-        with open(TELEMT_CONFIG, 'r') as f:
-            lines = f.readlines()
-        
-        with open(TELEMT_CONFIG, 'w') as f:
-            in_limits = False
-            for line in lines:
-                if '[access.user_max_unique_ips]' in line:
-                    in_limits = True
-                    f.write(line)
-                    continue
-                if in_limits and line.startswith('['):
-                    in_limits = False
-                
-                if in_limits and line.strip().startswith(f'{username} ='):
-                    continue
-                f.write(line)
-        
-        if limit > 0:
-            with open(TELEMT_CONFIG, 'r') as f:
-                lines = f.readlines()
-            
-            with open(TELEMT_CONFIG, 'w') as f:
-                for line in lines:
-                    f.write(line)
-                    if '[access.user_max_unique_ips]' in line:
-                        f.write(f'{username} = {limit}\n')
-        
-        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
-        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
-        subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка установки лимита: {e}")
-        return False
-
 def add_user_to_config(username, secret):
     try:
         if not re.match(r'^[a-zA-Z0-9_-]+$', username):
             return False
-        
         existing_users = get_users()
         for u in existing_users:
             if u['name'] == username:
@@ -1019,19 +975,13 @@ def add_user_to_config(username, secret):
         with open(TELEMT_CONFIG, 'r') as f:
             lines = f.readlines()
         
-        # Проверяем, есть ли секция [access.users]
-        has_users_section = False
-        for line in lines:
-            if '[access.users]' in line:
-                has_users_section = True
-                break
+        has_users_section = any('[access.users]' in line for line in lines)
         
         with open(TELEMT_CONFIG, 'w') as f:
             for line in lines:
                 f.write(line)
                 if '[access.users]' in line:
                     f.write(f'{username} = "{secret}"\n')
-            
             if not has_users_section:
                 f.write('\n[access.users]\n')
                 f.write(f'{username} = "{secret}"\n')
@@ -1048,7 +998,6 @@ def remove_user_from_config(username):
     try:
         with open(TELEMT_CONFIG, 'r') as f:
             lines = f.readlines()
-        
         with open(TELEMT_CONFIG, 'w') as f:
             in_users_section = False
             for line in lines:
@@ -1058,64 +1007,15 @@ def remove_user_from_config(username):
                     continue
                 if in_users_section and line.startswith('['):
                     in_users_section = False
-                
                 if line.strip().startswith(f'{username} ='):
                     continue
                 f.write(line)
-        
-        with open(TELEMT_CONFIG, 'r') as f:
-            lines = f.readlines()
-        
-        with open(TELEMT_CONFIG, 'w') as f:
-            in_limits = False
-            for line in lines:
-                if '[access.user_max_unique_ips]' in line:
-                    in_limits = True
-                    f.write(line)
-                    continue
-                if in_limits and line.startswith('['):
-                    in_limits = False
-                
-                if in_limits and line.strip().startswith(f'{username} ='):
-                    continue
-                f.write(line)
-        
         subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
         return True
     except Exception as e:
         logger.error(f"Ошибка удаления пользователя: {e}")
-        return False
-
-def change_sni_in_config(new_sni):
-    try:
-        with open(TELEMT_CONFIG, 'r') as f:
-            content = f.read()
-        content = re.sub(r'tls_domain = "[^"]*"', f'tls_domain = "{new_sni}"', content)
-        with open(TELEMT_CONFIG, 'w') as f:
-            f.write(content)
-        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
-        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
-        subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка изменения SNI: {e}")
-        return False
-
-def change_port_in_config(new_port):
-    try:
-        with open(TELEMT_CONFIG, 'r') as f:
-            content = f.read()
-        content = re.sub(r'port = \d+', f'port = {new_port}', content)
-        with open(TELEMT_CONFIG, 'w') as f:
-            f.write(content)
-        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
-        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
-        subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка изменения порта: {e}")
         return False
 
 def generate_secret():
@@ -1150,20 +1050,17 @@ def get_main_keyboard():
         [InlineKeyboardButton("❌ Удалить пользователя", callback_data="remove_user")],
         [InlineKeyboardButton("🔒 Сменить SNI", callback_data="change_sni")],
         [InlineKeyboardButton("🔌 Сменить порт", callback_data="change_port")],
-        [InlineKeyboardButton("🔢 Лимит IP для пользователя", callback_data="change_limit")],
         [InlineKeyboardButton("🔄 Перезапустить telemt", callback_data="restart")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_cancel_keyboard():
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_input")]]
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_input")]])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
-    
     await update.message.reply_text(
         "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
         reply_markup=get_main_keyboard(),
@@ -1173,308 +1070,131 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     user_id = update.effective_user.id
-    
     if not is_admin(user_id):
         await query.edit_message_text("⛔ Доступ запрещён.")
         return
-    
     data = query.data
-    
     if data == "status":
-        info = get_server_info()
-        await query.edit_message_text(
-            f"📊 *Информация о сервере*\n\n{info}",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]])
-        )
-        
+        await query.edit_message_text(f"📊 *Информация о сервере*\n\n{get_server_info()}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]]))
     elif data == "list_users":
         users = get_users()
         if not users:
-            await query.edit_message_text(
-                "📭 Нет добавленных пользователей",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]])
-            )
+            await query.edit_message_text("📭 Нет добавленных пользователей", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]]))
             return
-        
         text = "👥 *Список пользователей:*\n\n"
         for i, user in enumerate(users, 1):
-            limit = get_user_limit(user['name'])
-            limit_text = f" (лимит: {limit} IP)" if limit > 0 else ""
-            text += f"{i}. *{user['name']}*{limit_text}\n   `{user['secret'][:20]}...`\n\n"
-        
-        await query.edit_message_text(
-            text,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]])
-        )
-        
+            text += f"{i}. *{user['name']}*\n   `{user['secret'][:20]}...`\n\n"
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]]))
     elif data == "add_user":
         user_inputs[user_id] = {'action': 'add_user'}
-        await query.edit_message_text(
-            "Введите имя пользователя (только латиница, цифры, - и _):",
-            reply_markup=get_cancel_keyboard()
-        )
-        
+        await query.edit_message_text("Введите имя пользователя (только латиница, цифры, - и _):", reply_markup=get_cancel_keyboard())
     elif data == "remove_user":
         users = get_users()
         if not users:
-            await query.edit_message_text(
-                "📭 Нет пользователей для удаления",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]])
-            )
+            await query.edit_message_text("📭 Нет пользователей для удаления", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]]))
             return
-        
-        keyboard = []
-        for user in users:
-            keyboard.append([InlineKeyboardButton(f"❌ {user['name']}", callback_data=f"remove_{user['name']}")])
+        keyboard = [[InlineKeyboardButton(f"❌ {user['name']}", callback_data=f"remove_{user['name']}")] for user in users]
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
-        
-        await query.edit_message_text(
-            "Выберите пользователя для удаления:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        
+        await query.edit_message_text("Выберите пользователя для удаления:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("remove_"):
         username = data.replace("remove_", "")
         if remove_user_from_config(username):
             await query.edit_message_text(f"✅ Пользователь *{username}* удалён", parse_mode='Markdown')
         else:
             await query.edit_message_text("❌ Ошибка при удалении")
-        
-        await query.edit_message_text(
-            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
-        
+        await query.edit_message_text("🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
     elif data == "change_sni":
         user_inputs[user_id] = {'action': 'change_sni'}
-        await query.edit_message_text(
-            "Введите новый SNI (например: cloudflare.com):",
-            reply_markup=get_cancel_keyboard()
-        )
-        
+        await query.edit_message_text("Введите новый SNI (например: cloudflare.com):", reply_markup=get_cancel_keyboard())
     elif data == "change_port":
         user_inputs[user_id] = {'action': 'change_port'}
-        await query.edit_message_text(
-            "Введите новый порт (1-65535):",
-            reply_markup=get_cancel_keyboard()
-        )
-        
-    elif data == "change_limit":
-        users = get_users()
-        if not users:
-            await query.edit_message_text(
-                "📭 Нет пользователей для изменения лимита",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]])
-            )
-            return
-        
-        keyboard = []
-        for user in users:
-            current_limit = get_user_limit(user['name'])
-            limit_text = f" (текущий: {current_limit} IP)" if current_limit > 0 else " (без лимита)"
-            keyboard.append([InlineKeyboardButton(f"🔢 {user['name']}{limit_text}", callback_data=f"limit_{user['name']}")])
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
-        
-        await query.edit_message_text(
-            "Выберите пользователя для изменения лимита IP:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        
-    elif data.startswith("limit_"):
-        username = data.replace("limit_", "")
-        user_inputs[user_id] = {'action': 'change_limit', 'username': username}
-        await query.edit_message_text(
-            f"Введите новый лимит IP для пользователя *{username}*\n"
-            f"0 - без лимита\n"
-            f"1 - только один IP одновременно\n"
-            f"любое другое число - максимальное количество уникальных IP",
-            parse_mode='Markdown',
-            reply_markup=get_cancel_keyboard()
-        )
-        
+        await query.edit_message_text("Введите новый порт (1-65535):", reply_markup=get_cancel_keyboard())
     elif data == "restart":
         await query.edit_message_text("🔄 Перезапуск telemt...")
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
-        await query.edit_message_text(
-            "✅ Telemt перезапущен\n\n🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
-        
+        await query.edit_message_text("✅ Telemt перезапущен\n\n🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
     elif data == "back_to_menu":
-        await query.edit_message_text(
-            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
-        
+        await query.edit_message_text("🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
     elif data == "cancel_input":
         if user_id in user_inputs:
             del user_inputs[user_id]
-        await query.edit_message_text(
-            "❌ Действие отменено\n\n🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("❌ Действие отменено\n\n🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
+    return
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     if not is_admin(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
-    
     if user_id not in user_inputs:
         return
-    
     action = user_inputs[user_id]['action']
     text = update.message.text.strip()
-    
     if action == 'add_user':
-        username = text
-        
-        if not re.match(r'^[a-zA-Z0-9_-]+$', username):
+        if not re.match(r'^[a-zA-Z0-9_-]+$', text):
             await update.message.reply_text("❌ Имя пользователя может содержать только латинские буквы, цифры, - и _")
-            await update.message.reply_text(
-                "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-                reply_markup=get_main_keyboard(),
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text("🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
             del user_inputs[user_id]
             return
-        
         existing_users = get_users()
         for u in existing_users:
-            if u['name'] == username:
-                await update.message.reply_text(f"❌ Пользователь *{username}* уже существует!", parse_mode='Markdown')
-                await update.message.reply_text(
-                    "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-                    reply_markup=get_main_keyboard(),
-                    parse_mode='Markdown'
-                )
+            if u['name'] == text:
+                await update.message.reply_text(f"❌ Пользователь *{text}* уже существует!", parse_mode='Markdown')
+                await update.message.reply_text("🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
                 del user_inputs[user_id]
                 return
-        
         secret = generate_secret()
         random_part = secret[2:34]
-        
-        if add_user_to_config(username, random_part):
+        if add_user_to_config(text, random_part):
             ip = get_server_ip()
             port = get_current_port()
             tg_link = f"tg://proxy?server={ip}&port={port}&secret={secret}"
             https_link = f"https://t.me/proxy?server={ip}&port={port}&secret={secret}"
-            
-            await update.message.reply_text(
-                f"✅ *Пользователь добавлен!*\n\n"
-                f"👤 *Имя:* `{username}`\n\n"
-                f"🔗 *Ссылка для Telegram (нажмите для установки):*\n"
-                f"{tg_link}\n\n"
-                f"📋 *Ссылка для копирования:*\n"
-                f"`{https_link}`",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text(f"✅ *Пользователь добавлен!*\n\n👤 *Имя:* `{text}`\n\n🔗 *Ссылка для Telegram (нажмите для установки):*\n{tg_link}\n\n📋 *Ссылка для копирования:*\n`{https_link}`", parse_mode='Markdown')
         else:
             await update.message.reply_text("❌ Ошибка при добавлении пользователя")
-        
-        await update.message.reply_text(
-            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
         del user_inputs[user_id]
-        
     elif action == 'change_sni':
-        if change_sni_in_config(text):
+        try:
+            with open(TELEMT_CONFIG, 'r') as f:
+                content = f.read()
+            content = re.sub(r'tls_domain = "[^"]*"', f'tls_domain = "{text}"', content)
+            with open(TELEMT_CONFIG, 'w') as f:
+                f.write(content)
+            subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
+            subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
+            subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
             await update.message.reply_text(f"✅ SNI изменён на `{text}`", parse_mode='Markdown')
-        else:
+        except Exception as e:
             await update.message.reply_text("❌ Ошибка при изменении SNI")
-        
-        await update.message.reply_text(
-            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
         del user_inputs[user_id]
-        
     elif action == 'change_port':
         if not text.isdigit() or int(text) < 1 or int(text) > 65535:
             await update.message.reply_text("❌ Неверный порт. Введите число от 1 до 65535.")
             return
-        
-        if change_port_in_config(text):
+        try:
+            with open(TELEMT_CONFIG, 'r') as f:
+                content = f.read()
+            content = re.sub(r'port = \d+', f'port = {text}', content)
+            with open(TELEMT_CONFIG, 'w') as f:
+                f.write(content)
+            subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
+            subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
+            subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
             await update.message.reply_text(f"✅ Порт изменён на `{text}`", parse_mode='Markdown')
-        else:
+        except Exception as e:
             await update.message.reply_text("❌ Ошибка при изменении порта")
-        
-        await update.message.reply_text(
-            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:", reply_markup=get_main_keyboard(), parse_mode='Markdown')
         del user_inputs[user_id]
-        
-    elif action == 'change_limit':
-        username = user_inputs[user_id].get('username')
-        if not username:
-            await update.message.reply_text("❌ Ошибка: пользователь не выбран")
-            await show_main_menu(update)
-            del user_inputs[user_id]
-            return
-        
-        if not text.isdigit():
-            await update.message.reply_text("❌ Введите число (0 - без лимита, 1 - один IP, и т.д.)")
-            return
-        
-        new_limit = int(text)
-        
-        if set_user_limit(username, new_limit):
-            if new_limit == 0:
-                await update.message.reply_text(f"✅ Для пользователя *{username}* убран лимит IP", parse_mode='Markdown')
-            else:
-                await update.message.reply_text(f"✅ Для пользователя *{username}* установлен лимит: {new_limit} IP", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ Ошибка при установке лимита")
-        
-        await update.message.reply_text(
-            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
-        del user_inputs[user_id]
-
-async def show_main_menu(update):
-    if isinstance(update, Update):
-        if update.callback_query:
-            await update.callback_query.message.edit_message_text(
-                "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-                reply_markup=get_main_keyboard(),
-                parse_mode='Markdown'
-            )
-        elif update.message:
-            await update.message.reply_text(
-                "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-                reply_markup=get_main_keyboard(),
-                parse_mode='Markdown'
-            )
-    else:
-        await update.edit_message_text(
-            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
-            reply_markup=get_main_keyboard(),
-            parse_mode='Markdown'
-        )
 
 def main():
     application = Application.builder().token(TOKEN).build()
-    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
     print("🤖 Бот запущен...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
@@ -1482,10 +1202,8 @@ if __name__ == '__main__':
     main()
 PYTHON_EOF
 
-    # Заменяем плейсхолдеры
     sed -i "s/TOKEN_PLACEHOLDER/$token/" $BOT_SCRIPT
     sed -i "s/ADMIN_ID_PLACEHOLDER/$admin_id/" $BOT_SCRIPT
-    
     chmod +x $BOT_SCRIPT
 }
 
