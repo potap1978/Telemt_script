@@ -83,6 +83,45 @@ get_users_count() {
     get_users_list | wc -l
 }
 
+get_ip_limits() {
+    declare -A limits
+    while IFS='=' read -r user limit; do
+        user=$(echo "$user" | xargs)
+        limit=$(echo "$limit" | xargs)
+        if [[ -n "$user" && "$limit" =~ ^[0-9]+$ ]]; then
+            limits["$user"]="$limit"
+        fi
+    done < <(sed -n '/^\[access.user_max_unique_ips\]/,/^\[/p' $TELEMT_CONFIG | grep -E '^[a-zA-Z0-9_-]+ = [0-9]+' 2>/dev/null || true)
+    
+    for key in "${!limits[@]}"; do
+        echo "$key=${limits[$key]}"
+    done
+}
+
+# Функция для очистки секции лимитов от некорректных записей
+clean_limits_section() {
+    if grep -q "^\[access.user_max_unique_ips\]" $TELEMT_CONFIG; then
+        local temp_file=$(mktemp)
+        local in_limits=0
+        
+        while IFS= read -r line; do
+            if [[ "$line" == "[access.user_max_unique_ips]" ]]; then
+                in_limits=1
+                echo "$line" >> $temp_file
+            elif [[ $in_limits -eq 1 ]] && [[ "$line" =~ ^\[ ]]; then
+                in_limits=0
+                echo "$line" >> $temp_file
+            elif [[ $in_limits -eq 1 ]] && [[ "$line" =~ ^[a-zA-Z0-9_-]+\ =\ [0-9]+$ ]]; then
+                echo "$line" >> $temp_file
+            elif [[ $in_limits -eq 0 ]]; then
+                echo "$line" >> $temp_file
+            fi
+        done < $TELEMT_CONFIG
+        
+        mv $temp_file $TELEMT_CONFIG
+    fi
+}
+
 # Функция для проверки и добавления тестового пользователя при необходимости
 ensure_at_least_one_user() {
     local users_count=$(get_users_count 2>/dev/null || echo 0)
@@ -356,6 +395,9 @@ add_user() {
             echo "" >> $TELEMT_CONFIG
             echo "[access.user_max_unique_ips]" >> $TELEMT_CONFIG
         fi
+        # Удаляем старую запись, если была
+        sed -i "/^$username = /d" $TELEMT_CONFIG
+        # Записываем как число (БЕЗ кавычек!)
         echo "$username = 1" >> $TELEMT_CONFIG
         info "Для пользователя $username установлено ограничение: 1 IP"
     fi
@@ -724,7 +766,7 @@ change_user_limit() {
         3) 
             read -p "Введите количество IP (число): " new_limit
             if ! [[ "$new_limit" =~ ^[0-9]+$ ]]; then
-                error "Неверное значение"
+                error "Неверное значение. Введите число."
                 pause
                 return
             fi
@@ -743,7 +785,7 @@ change_user_limit() {
     fi
     
     # Удаляем старую запись если есть
-    sed -i "/^$username = [0-9]/d" $TELEMT_CONFIG
+    sed -i "/^$username = /d" $TELEMT_CONFIG
     
     # Добавляем новую запись, если лимит не 0
     if [[ "$new_limit" != "0" ]]; then
@@ -906,6 +948,67 @@ def get_users():
         logger.error(f"Ошибка чтения пользователей: {e}")
     return users
 
+def get_user_limit(username):
+    """Получить лимит IP для пользователя"""
+    try:
+        in_limits = False
+        with open(TELEMT_CONFIG, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('[access.user_max_unique_ips]'):
+                    in_limits = True
+                    continue
+                if in_limits and line.startswith('['):
+                    break
+                if in_limits and '=' in line:
+                    parts = line.split('=', 1)
+                    if len(parts) == 2:
+                        user = parts[0].strip()
+                        limit = parts[1].strip()
+                        if user == username and limit.isdigit():
+                            return int(limit)
+    except Exception as e:
+        logger.error(f"Ошибка чтения лимита: {e}")
+    return 0
+
+def set_user_limit(username, limit):
+    """Установить лимит IP для пользователя"""
+    try:
+        # Удаляем старую запись
+        with open(TELEMT_CONFIG, 'r') as f:
+            lines = f.readlines()
+        
+        with open(TELEMT_CONFIG, 'w') as f:
+            in_limits = False
+            for line in lines:
+                if '[access.user_max_unique_ips]' in line:
+                    in_limits = True
+                    f.write(line)
+                    continue
+                if in_limits and line.startswith('['):
+                    in_limits = False
+                
+                if in_limits and line.strip().startswith(f'{username} ='):
+                    continue
+                f.write(line)
+        
+        # Добавляем новую запись, если лимит > 0
+        if limit > 0:
+            with open(TELEMT_CONFIG, 'r') as f:
+                lines = f.readlines()
+            
+            with open(TELEMT_CONFIG, 'w') as f:
+                for line in lines:
+                    f.write(line)
+                    if '[access.user_max_unique_ips]' in line:
+                        f.write(f'{username} = {limit}\n')
+        
+        subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка установки лимита: {e}")
+        return False
+
 def add_user_to_config(username, secret):
     try:
         # Проверка имени пользователя (только латиница, цифры, - и _)
@@ -949,6 +1052,24 @@ def remove_user_from_config(username):
                     in_users_section = False
                 
                 if line.strip().startswith(f'{username} ='):
+                    continue
+                f.write(line)
+        
+        # Также удаляем лимит, если есть
+        with open(TELEMT_CONFIG, 'r') as f:
+            lines = f.readlines()
+        
+        with open(TELEMT_CONFIG, 'w') as f:
+            in_limits = False
+            for line in lines:
+                if '[access.user_max_unique_ips]' in line:
+                    in_limits = True
+                    f.write(line)
+                    continue
+                if in_limits and line.startswith('['):
+                    in_limits = False
+                
+                if in_limits and line.strip().startswith(f'{username} ='):
                     continue
                 f.write(line)
         
@@ -1016,6 +1137,7 @@ def get_main_keyboard():
         [InlineKeyboardButton("❌ Удалить пользователя", callback_data="remove_user")],
         [InlineKeyboardButton("🔒 Сменить SNI", callback_data="change_sni")],
         [InlineKeyboardButton("🔌 Сменить порт", callback_data="change_port")],
+        [InlineKeyboardButton("🔢 Лимит IP для пользователя", callback_data="change_limit")],
         [InlineKeyboardButton("🔄 Перезапустить telemt", callback_data="restart")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1066,7 +1188,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text = "👥 *Список пользователей:*\n\n"
         for i, user in enumerate(users, 1):
-            text += f"{i}. *{user['name']}*\n   `{user['secret'][:20]}...`\n\n"
+            limit = get_user_limit(user['name'])
+            limit_text = f" (лимит: {limit} IP)" if limit > 0 else ""
+            text += f"{i}. *{user['name']}*{limit_text}\n   `{user['secret'][:20]}...`\n\n"
         
         await query.edit_message_text(
             text,
@@ -1124,6 +1248,39 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_inputs[user_id] = {'action': 'change_port'}
         await query.edit_message_text(
             "Введите новый порт (1-65535):",
+            reply_markup=get_cancel_keyboard()
+        )
+        
+    elif data == "change_limit":
+        users = get_users()
+        if not users:
+            await query.edit_message_text(
+                "📭 Нет пользователей для изменения лимита",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]])
+            )
+            return
+        
+        keyboard = []
+        for user in users:
+            current_limit = get_user_limit(user['name'])
+            limit_text = f" (текущий: {current_limit} IP)" if current_limit > 0 else " (без лимита)"
+            keyboard.append([InlineKeyboardButton(f"🔢 {user['name']}{limit_text}", callback_data=f"limit_{user['name']}")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
+        
+        await query.edit_message_text(
+            "Выберите пользователя для изменения лимита IP:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif data.startswith("limit_"):
+        username = data.replace("limit_", "")
+        user_inputs[user_id] = {'action': 'change_limit', 'username': username}
+        await query.edit_message_text(
+            f"Введите новый лимит IP для пользователя *{username}*\n"
+            f"0 - без лимита\n"
+            f"1 - только один IP одновременно\n"
+            f"любое другое число - максимальное количество уникальных IP",
+            parse_mode='Markdown',
             reply_markup=get_cancel_keyboard()
         )
         
@@ -1248,6 +1405,68 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         del user_inputs[user_id]
+        
+    elif action == 'change_limit':
+        username = user_inputs[user_id].get('username')
+        if not username:
+            await update.message.reply_text("❌ Ошибка: пользователь не выбран")
+            await show_main_menu(update)
+            del user_inputs[user_id]
+            return
+        
+        if not text.isdigit():
+            await update.message.reply_text("❌ Введите число (0 - без лимита, 1 - один IP, и т.д.)")
+            return
+        
+        new_limit = int(text)
+        
+        if set_user_limit(username, new_limit):
+            if new_limit == 0:
+                await update.message.reply_text(f"✅ Для пользователя *{username}* убран лимит IP", parse_mode='Markdown')
+            else:
+                await update.message.reply_text(f"✅ Для пользователя *{username}* установлен лимит: {new_limit} IP", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Ошибка при установке лимита")
+        
+        await update.message.reply_text(
+            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
+            reply_markup=get_main_keyboard(),
+            parse_mode='Markdown'
+        )
+        del user_inputs[user_id]
+
+async def show_main_menu(update):
+    keyboard = [
+        [InlineKeyboardButton("📊 Статус", callback_data="status")],
+        [InlineKeyboardButton("👥 Список пользователей", callback_data="list_users")],
+        [InlineKeyboardButton("➕ Добавить пользователя", callback_data="add_user")],
+        [InlineKeyboardButton("❌ Удалить пользователя", callback_data="remove_user")],
+        [InlineKeyboardButton("🔒 Сменить SNI", callback_data="change_sni")],
+        [InlineKeyboardButton("🔌 Сменить порт", callback_data="change_port")],
+        [InlineKeyboardButton("🔢 Лимит IP для пользователя", callback_data="change_limit")],
+        [InlineKeyboardButton("🔄 Перезапустить telemt", callback_data="restart")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if isinstance(update, Update):
+        if update.callback_query:
+            await update.callback_query.message.edit_text(
+                "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        elif update.message:
+            await update.message.reply_text(
+                "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    else:
+        await update.edit_message_text(
+            "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
 
 def main():
     application = Application.builder().token(TOKEN).build()
@@ -1437,6 +1656,7 @@ show_menu() {
 # ============================================
 main() {
     check_root
+    clean_limits_section
     
     while true; do
         show_menu
