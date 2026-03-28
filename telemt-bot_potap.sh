@@ -354,10 +354,10 @@ add_user() {
     echo -e "${GREEN}${BOLD}ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН!${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}Имя:${NC} $username"
-    echo -e "${YELLOW}Ссылка для Telegram (нажмите для установки):${NC}"
+    echo -e "${YELLOW}📱 TG ссылка (нажмите для установки):${NC}"
     echo -e "${GREEN}$tg_link${NC}"
     echo ""
-    echo -e "${YELLOW}Ссылка для копирования:${NC}"
+    echo -e "${YELLOW}🌐 HTTP ссылка (для копирования):${NC}"
     echo -e "${GREEN}$https_link${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
@@ -376,11 +376,13 @@ list_users() {
         return
     fi
     
-    current_sni=$(grep -oP 'tls_domain = "\K[^"]+' $TELEMT_CONFIG 2>/dev/null || echo "не задан")
-    current_port=$(grep -oP 'port = \K\d+' $TELEMT_CONFIG 2>/dev/null || echo "не задан")
+    current_sni=$(grep -oP 'tls_domain = "\K[^"]+' $TELEMT_CONFIG 2>/dev/null || echo "www.google.com")
+    current_port=$(grep -oP 'port = \K\d+' $TELEMT_CONFIG 2>/dev/null || echo "7443")
+    server_ip=$(get_server_ip)
     
     echo -e "${CYAN}Глобальный SNI сервера:${NC} ${YELLOW}$current_sni${NC}"
     echo -e "${CYAN}Порт:${NC} ${YELLOW}$current_port${NC}"
+    echo -e "${CYAN}IP сервера:${NC} ${YELLOW}$server_ip${NC}"
     echo ""
     
     users=$(get_users_list)
@@ -391,22 +393,31 @@ list_users() {
         return
     fi
     
-    echo -e "${CYAN}Список пользователей:${NC}"
-    echo "─────────────────────────────────────────────────────────────────────────────"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     printf "${CYAN}%-4s %-20s %-40s${NC}\n" "№" "ИМЯ" "СЕКРЕТ (32 hex)"
-    echo "─────────────────────────────────────────────────────────────────────────────"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     line_num=1
     while IFS='=' read -r username secret_part; do
         username=$(echo "$username" | xargs)
         secret=$(echo "$secret_part" | xargs | tr -d '"')
         if [[ -n "$username" && "$username" != "#"* ]]; then
+            # Формируем полный секрет для ссылки
+            sni_hex=$(echo -n "$current_sni" | xxd -p -c 1000)
+            full_secret="ee${secret}${sni_hex}"
+            tg_link="tg://proxy?server=$server_ip&port=$current_port&secret=$full_secret"
+            https_link="https://t.me/proxy?server=$server_ip&port=$current_port&secret=$full_secret"
+            
+            # Выводим информацию
             printf "%-4s %-20s %-40s\n" "$line_num" "$username" "$secret"
+            echo -e "    ${GREEN}📱 TG ссылка:${NC} $tg_link"
+            echo -e "    ${BLUE}🌐 HTTP ссылка:${NC} $https_link"
+            echo ""
             ((line_num++))
         fi
     done <<< "$users"
     
-    echo "─────────────────────────────────────────────────────────────────────────────"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     info "Всего пользователей: $((line_num - 1))"
     
     pause
