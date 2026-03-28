@@ -1194,11 +1194,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not users:
             await query.edit_message_text("📭 Нет добавленных пользователей", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]]))
             return
+        
+        current_sni = get_current_sni()
+        current_port = get_current_port()
+        server_ip = get_server_ip()
+        sni_hex = subprocess.run(['xxd', '-p'], input=current_sni, capture_output=True, text=True).stdout.strip().replace('\n', '')
+        
         text = "👥 *Список пользователей:*\n\n"
         for i, user in enumerate(users, 1):
             limit = get_user_limit(user['name'])
-            limit_text = f" (лимит: {limit} IP)" if limit > 0 else ""
-            text += f"{i}. *{user['name']}*{limit_text}\n   `{user['secret'][:20]}...`\n\n"
+            limit_text = f" 🔒 лимит: {limit} IP" if limit > 0 else ""
+            
+            full_secret = f"ee{user['secret']}{sni_hex}"
+            tg_link = f"tg://proxy?server={server_ip}&port={current_port}&secret={full_secret}"
+            https_link = f"https://t.me/proxy?server={server_ip}&port={current_port}&secret={full_secret}"
+            
+            text += f"*{i}. {user['name']}*{limit_text}\n"
+            text += f"📱 TG: `{tg_link}`\n"
+            text += f"🌐 HTTP: `{https_link}`\n\n"
+        
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]]))
         
     elif data == "add_user":
