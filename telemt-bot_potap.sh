@@ -389,6 +389,13 @@ add_user() {
     # Добавляем пользователя
     echo "$username = \"$secret_random\"" >> $TELEMT_CONFIG
     
+    # Проверка, что пользователь добавился
+    if ! grep -q "^$username = " $TELEMT_CONFIG; then
+        error "Не удалось добавить пользователя в конфиг!"
+        pause
+        return
+    fi
+    
     # Добавляем ограничение IP, если пользователь согласился
     if [[ "$limit_ip" == "y" || "$limit_ip" == "Y" ]]; then
         if ! grep -q "^\[access.user_max_unique_ips\]" $TELEMT_CONFIG; then
@@ -1450,7 +1457,7 @@ async def show_main_menu(update):
     
     if isinstance(update, Update):
         if update.callback_query:
-            await update.callback_query.message.edit_text(
+            await update.callback_query.message.edit_message_text(
                 "🤖 *Telemt Bot*\n\n*Передай привеД ПОТАПу !!!*\n\nВыберите действие:",
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
