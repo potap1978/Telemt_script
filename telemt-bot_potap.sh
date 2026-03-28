@@ -354,8 +354,8 @@ add_user() {
     
     [[ -z "$username" ]] && username="user_$(date +%s)"
     
-    # Проверка: существует ли уже такой пользователь в секции users
-    if get_users_list | grep -q "^$username = "; then
+    # Проверка: существует ли уже такой пользователь
+    if grep -q "^$username = " $TELEMT_CONFIG; then
         error "Пользователь с именем '$username' уже существует!"
         pause
         return
@@ -382,8 +382,11 @@ add_user() {
     # Добавляем пользователя в секцию access.users
     echo "$username = \"$secret_random\"" >> $TELEMT_CONFIG
     
+    # Сразу восстанавливаем права, чтобы telemt мог читать
+    fix_config_permissions
+    
     # Проверка, что пользователь добавился
-    if ! get_users_list | grep -q "^$username = "; then
+    if ! grep -q "^$username = " $TELEMT_CONFIG; then
         error "Не удалось добавить пользователя в конфиг!"
         pause
         return
@@ -396,11 +399,13 @@ add_user() {
             echo "" >> $TELEMT_CONFIG
             echo "[access.user_max_unique_ips]" >> $TELEMT_CONFIG
         fi
-        # Удаляем старую запись, если была (на случай повторного добавления)
+        # Удаляем старую запись, если была
         sed -i "/^$username = [0-9]/d" $TELEMT_CONFIG
-        # Добавляем лимит (числом, без кавычек)
+        # Добавляем лимит (числом, без кавычек!)
         echo "$username = 1" >> $TELEMT_CONFIG
         info "Для пользователя $username установлено ограничение: 1 IP"
+        # Снова восстанавливаем права после изменения
+        fix_config_permissions
     fi
     
     # Удаляем тестового пользователя если он есть и это не единственный пользователь
@@ -408,10 +413,8 @@ add_user() {
     if [[ $users_count -gt 1 ]] && grep -q "^temp_user = " $TELEMT_CONFIG; then
         sed -i "/^temp_user = /d" $TELEMT_CONFIG
         sed -i "/^temp_user = [0-9]/d" $TELEMT_CONFIG
+        fix_config_permissions
     fi
-    
-    # Восстанавливаем права на конфиг
-    fix_config_permissions
     
     # Перезапускаем telemt
     systemctl restart telemt
@@ -821,7 +824,7 @@ change_user_limit() {
 }
 
 # ============================================
-# Управление Telegram ботом (сокращён для длины)
+# Управление Telegram ботом
 # ============================================
 install_bot() {
     clear
