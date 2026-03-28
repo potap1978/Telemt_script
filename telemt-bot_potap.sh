@@ -83,19 +83,10 @@ get_users_count() {
     get_users_list | wc -l
 }
 
-get_ip_limits() {
-    declare -A limits
-    while IFS='=' read -r user limit; do
-        user=$(echo "$user" | xargs)
-        limit=$(echo "$limit" | xargs)
-        if [[ -n "$user" && "$limit" =~ ^[0-9]+$ ]]; then
-            limits["$user"]="$limit"
-        fi
-    done < <(sed -n '/^\[access.user_max_unique_ips\]/,/^\[/p' $TELEMT_CONFIG | grep -E '^[a-zA-Z0-9_-]+ = [0-9]+' 2>/dev/null || true)
-    
-    for key in "${!limits[@]}"; do
-        echo "$key=${limits[$key]}"
-    done
+# Функция для восстановления прав на конфиг
+fix_config_permissions() {
+    chown $TELEMT_USER:$TELEMT_GROUP $TELEMT_CONFIG 2>/dev/null
+    chmod 644 $TELEMT_CONFIG 2>/dev/null
 }
 
 # Функция для очистки секции лимитов от некорректных записей
@@ -119,6 +110,7 @@ clean_limits_section() {
         done < $TELEMT_CONFIG
         
         mv $temp_file $TELEMT_CONFIG
+        fix_config_permissions
     fi
 }
 
@@ -130,6 +122,7 @@ ensure_at_least_one_user() {
         local temp_secret=$(openssl rand -hex 16 2>/dev/null)
         if [[ -n "$temp_secret" ]]; then
             echo "temp_user = \"$temp_secret\"" >> $TELEMT_CONFIG
+            fix_config_permissions
             info "Добавлен тестовый пользователь: temp_user"
             return 0
         else
@@ -264,6 +257,7 @@ tls_domain = "www.google.com"
 temp_user = "$temp_secret"
 EOF
     chown $TELEMT_USER:$TELEMT_GROUP $TELEMT_CONFIG
+    chmod 644 $TELEMT_CONFIG
 }
 
 create_systemd_service() {
@@ -415,6 +409,9 @@ add_user() {
         sed -i "/^temp_user = /d" $TELEMT_CONFIG
         sed -i "/^temp_user = [0-9]/d" $TELEMT_CONFIG
     fi
+    
+    # Восстанавливаем права на конфиг (ВАЖНО!)
+    fix_config_permissions
     
     systemctl restart telemt
     sleep 2
@@ -590,6 +587,7 @@ remove_user() {
     
     sed -i "/^$username_to_remove = /d" $TELEMT_CONFIG
     sed -i "/^$username_to_remove = [0-9]/d" $TELEMT_CONFIG
+    fix_config_permissions
     systemctl restart telemt
     success "Пользователь $username_to_remove удален"
     
@@ -628,6 +626,9 @@ change_sni() {
     
     # Проверяем, есть ли пользователи в конфиге
     ensure_at_least_one_user
+    
+    # Восстанавливаем права
+    fix_config_permissions
     
     step "Перезапуск сервиса..."
     systemctl restart telemt
@@ -672,6 +673,9 @@ change_port() {
     
     # Проверяем, есть ли пользователи в конфиге
     ensure_at_least_one_user
+    
+    # Восстанавливаем права
+    fix_config_permissions
     
     step "Перезапуск сервиса..."
     systemctl restart telemt
@@ -801,6 +805,9 @@ change_user_limit() {
     else
         success "Для пользователя $username убран лимит"
     fi
+    
+    # Восстанавливаем права
+    fix_config_permissions
     
     systemctl restart telemt
     
@@ -1010,6 +1017,9 @@ def set_user_limit(username, limit):
                     if '[access.user_max_unique_ips]' in line:
                         f.write(f'{username} = {limit}\n')
         
+        # Восстанавливаем права
+        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
+        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
         return True
     except Exception as e:
@@ -1037,6 +1047,9 @@ def add_user_to_config(username, secret):
                 if '[access.users]' in line:
                     f.write(f'{username} = "{secret}"\n')
         
+        # Восстанавливаем права
+        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
+        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
         return True
     except Exception as e:
@@ -1080,6 +1093,9 @@ def remove_user_from_config(username):
                     continue
                 f.write(line)
         
+        # Восстанавливаем права
+        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
+        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
         return True
     except Exception as e:
@@ -1093,6 +1109,8 @@ def change_sni_in_config(new_sni):
         content = re.sub(r'tls_domain = "[^"]*"', f'tls_domain = "{new_sni}"', content)
         with open(TELEMT_CONFIG, 'w') as f:
             f.write(content)
+        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
+        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
         return True
     except Exception as e:
@@ -1106,6 +1124,8 @@ def change_port_in_config(new_port):
         content = re.sub(r'port = \d+', f'port = {new_port}', content)
         with open(TELEMT_CONFIG, 'w') as f:
             f.write(content)
+        subprocess.run(['chown', 'telemt:telemt', TELEMT_CONFIG], capture_output=True)
+        subprocess.run(['chmod', '644', TELEMT_CONFIG], capture_output=True)
         subprocess.run(['systemctl', 'restart', 'telemt'], capture_output=True)
         return True
     except Exception as e:
